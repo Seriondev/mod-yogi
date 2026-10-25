@@ -1,0 +1,1337 @@
+name: Build ClientUtils v2 (Fabric 1.21.11)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
+
+      - name: Resolve Fabric versions and write project files
+        run: |
+          set -e
+          MC=1.21.11
+          YARN=$(curl -s https://meta.fabricmc.net/v2/versions/yarn/$MC | jq -r '.[0].version')
+          LOADER=$(curl -s https://meta.fabricmc.net/v2/versions/loader | jq -r '[.[] | select(.stable==true)][0].version')
+          API=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/maven-metadata.xml | grep -o "<version>[^<]*+$MC</version>" | sed 's/<[^>]*>//g' | tail -1)
+          echo "MC=$MC YARN=$YARN LOADER=$LOADER API=$API"
+          if [ -z "$YARN" ] || [ -z "$LOADER" ] || [ -z "$API" ]; then echo "Gagal mengambil versi Fabric"; exit 1; fi
+
+          mkdir -p mod && cd mod
+          mkdir -p src/main/java/com/example/clientutils
+          mkdir -p src/main/resources/assets/clientutils/lang
+
+          cat > gradle.properties <<EOF
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+          minecraft_version=$MC
+          yarn_mappings=$YARN
+          loader_version=$LOADER
+          fabric_version=$API
+          mod_version=2.0.0
+          maven_group=com.example
+          archives_base_name=clientutils
+          EOF
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'clientutils'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'fabric-loom' version '1.14-SNAPSHOT'
+              id 'maven-publish'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": inputs.properties.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+              it.options.encoding = 'UTF-8'
+          }
+
+          java {
+              withSourcesJar()
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF
+
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "clientutils",
+            "version": "${version}",
+            "name": "Client Utils",
+            "description": "Client mod: mod menu UI, waypoints, swappers, crosshair, keystrokes, FPS, CPS.",
+            "authors": ["You"],
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["com.example.clientutils.ClientUtilsMod"]
+            },
+            "depends": {
+              "fabricloader": ">=0.16.0",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat > src/main/resources/assets/clientutils/lang/en_us.json <<'EOF'
+          {
+            "key.category.clientutils.main": "Client Utils",
+            "key.clientutils.open": "Open Mod Menu",
+            "key.clientutils.elytra": "Elytra Swapper",
+            "key.clientutils.pearl": "Ender Pearl + Wind Charge",
+            "key.clientutils.spear": "Spear Lunge Swapper"
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/Config.java <<'EOF'
+          package com.example.clientutils;
+
+          import com.google.gson.Gson;
+          import com.google.gson.GsonBuilder;
+          import net.fabricmc.loader.api.FabricLoader;
+
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class Config {
+              public static class Waypoint {
+                  public String name = "Waypoint";
+                  public String dim = "minecraft:overworld";
+                  public int x, y, z;
+                  public int color = 0x55FF55;
+              }
+
+              public boolean healthIndicator = true;
+              public boolean waypoints = true;
+              public boolean waypointArrow = true;
+              public boolean waypointList = true;
+              public boolean waypointDistance = true;
+              public boolean coordinates = false;
+
+              public boolean elytraSwapper = true;
+              public boolean pearlSwapper = true;
+              public boolean windCombo = true;
+              public boolean spearSwapper = true;
+
+              public boolean crosshair = true;
+              public int crosshairStyle = 3;
+              public int crosshairSize = 1;
+              public int crosshairColor = 0xFFFFFF;
+              public int crosshairTargetColor = 0xFF0000;
+
+              public boolean keystrokes = true;
+              public boolean keystrokesMouse = true;
+              public boolean keystrokesSpace = true;
+              public boolean fps = true;
+              public boolean cps = true;
+
+              public List<Waypoint> list = new ArrayList<>();
+
+              private static Config INSTANCE = new Config();
+              private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+              private static Path path() {
+                  return FabricLoader.getInstance().getConfigDir().resolve("clientutils.json");
+              }
+
+              public static Config get() {
+                  return INSTANCE;
+              }
+
+              public static void load() {
+                  try {
+                      Path p = path();
+                      if (Files.exists(p)) {
+                          Config c = GSON.fromJson(Files.readString(p), Config.class);
+                          if (c != null) {
+                              if (c.list == null) c.list = new ArrayList<>();
+                              INSTANCE = c;
+                          }
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+              }
+
+              public static void save() {
+                  try {
+                      Files.writeString(path(), GSON.toJson(INSTANCE));
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+              }
+
+              public static void resetFeatures() {
+                  Config n = new Config();
+                  n.list = INSTANCE.list;
+                  INSTANCE = n;
+                  save();
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/ClientUtilsMod.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+          import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.util.Identifier;
+          import org.lwjgl.glfw.GLFW;
+
+          public class ClientUtilsMod implements ClientModInitializer {
+              public static KeyBinding openKey, elytraKey, pearlKey, spearKey;
+
+              @Override
+              public void onInitializeClient() {
+                  Config.load();
+
+                  KeyBinding.Category cat = KeyBinding.Category.create(Identifier.of("clientutils", "main"));
+                  openKey = KeyBindingHelper.registerKeyBinding(
+                          new KeyBinding("key.clientutils.open", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_U, cat));
+                  elytraKey = KeyBindingHelper.registerKeyBinding(
+                          new KeyBinding("key.clientutils.elytra", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, cat));
+                  pearlKey = KeyBindingHelper.registerKeyBinding(
+                          new KeyBinding("key.clientutils.pearl", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_Y, cat));
+                  spearKey = KeyBindingHelper.registerKeyBinding(
+                          new KeyBinding("key.clientutils.spear", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_F, cat));
+
+                  ClientTickEvents.END_CLIENT_TICK.register(mc -> {
+                      Swappers.tick(mc);
+                      if (mc.player == null || mc.world == null) return;
+
+                      while (openKey.wasPressed()) {
+                          if (mc.currentScreen == null) mc.setScreen(new ModMenuScreen(0));
+                      }
+                      while (elytraKey.wasPressed()) {
+                          if (mc.currentScreen == null && Config.get().elytraSwapper) Swappers.elytra(mc);
+                      }
+                      while (pearlKey.wasPressed()) {
+                          if (mc.currentScreen == null && Config.get().pearlSwapper) Swappers.pearl(mc);
+                      }
+                      while (spearKey.wasPressed()) {
+                          if (mc.currentScreen == null && Config.get().spearSwapper) Swappers.spear(mc);
+                      }
+                  });
+
+                  HudElementRegistry.addLast(Identifier.of("clientutils", "hud"), Hud::render);
+
+                  HudElementRegistry.replaceElement(VanillaHudElements.CROSSHAIR, original -> (ctx, tick) -> {
+                      MinecraftClient mc = MinecraftClient.getInstance();
+                      if (Config.get().crosshair && mc.options.getPerspective().isFirstPerson()) {
+                          Crosshair.renderHud(ctx, mc);
+                      } else {
+                          original.render(ctx, tick);
+                      }
+                  });
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/Swappers.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.component.DataComponentTypes;
+          import net.minecraft.component.type.EquippableComponent;
+          import net.minecraft.enchantment.Enchantment;
+          import net.minecraft.entity.EquipmentSlot;
+          import net.minecraft.entity.player.PlayerInventory;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.item.Items;
+          import net.minecraft.registry.Registries;
+          import net.minecraft.registry.entry.RegistryEntry;
+          import net.minecraft.screen.slot.SlotActionType;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.ActionResult;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.Identifier;
+
+          public class Swappers {
+              private static int spearTicks = -1;
+              private static int spearPrev = -1;
+
+              private static boolean isChestplate(ItemStack s) {
+                  if (s.isOf(Items.ELYTRA)) return false;
+                  EquippableComponent e = s.get(DataComponentTypes.EQUIPPABLE);
+                  return e != null && e.slot() == EquipmentSlot.CHEST;
+              }
+
+              private static void click(MinecraftClient mc, ClientPlayerEntity p, int slot) {
+                  mc.interactionManager.clickSlot(p.playerScreenHandler.syncId, slot, 0, SlotActionType.PICKUP, p);
+              }
+
+              public static void elytra(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  if (p == null || mc.interactionManager == null) return;
+
+                  boolean wearingElytra = p.getEquippedStack(EquipmentSlot.CHEST).isOf(Items.ELYTRA);
+                  int found = -1;
+                  for (int i = 9; i <= 44; i++) {
+                      ItemStack s = p.playerScreenHandler.getSlot(i).getStack();
+                      if (s.isEmpty()) continue;
+                      if (wearingElytra ? isChestplate(s) : s.isOf(Items.ELYTRA)) {
+                          found = i;
+                          break;
+                      }
+                  }
+                  if (found < 0) {
+                      p.sendMessage(Text.literal(wearingElytra ? "Chestplate tidak ditemukan" : "Elytra tidak ditemukan"), true);
+                      return;
+                  }
+                  click(mc, p, found);
+                  click(mc, p, 6);
+                  click(mc, p, found);
+                  p.sendMessage(Text.literal(wearingElytra ? "Swap ke Chestplate" : "Swap ke Elytra"), true);
+              }
+
+              private static void useSlot(MinecraftClient mc, ClientPlayerEntity p, int slot) {
+                  p.getInventory().setSelectedSlot(slot);
+                  ActionResult r = mc.interactionManager.interactItem(p, Hand.MAIN_HAND);
+                  if (r.isAccepted()) p.swingHand(Hand.MAIN_HAND);
+              }
+
+              public static void pearl(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  if (p == null || mc.interactionManager == null) return;
+
+                  PlayerInventory inv = p.getInventory();
+                  int pearl = -1, wind = -1;
+                  for (int i = 0; i < 9; i++) {
+                      ItemStack s = inv.getStack(i);
+                      if (pearl < 0 && s.isOf(Items.ENDER_PEARL)) pearl = i;
+                      if (wind < 0 && s.isOf(Items.WIND_CHARGE)) wind = i;
+                  }
+                  if (!Config.get().windCombo) wind = -1;
+
+                  if (pearl < 0 && wind < 0) {
+                      p.sendMessage(Text.literal("Ender pearl / wind charge tidak ada di hotbar"), true);
+                      return;
+                  }
+                  int prev = inv.getSelectedSlot();
+                  if (pearl >= 0) useSlot(mc, p, pearl);
+                  if (wind >= 0) useSlot(mc, p, wind);
+                  inv.setSelectedSlot(prev);
+              }
+
+              private static boolean isSpear(ItemStack s) {
+                  if (s.isEmpty()) return false;
+                  return Registries.ITEM.getId(s.getItem()).getPath().endsWith("_spear");
+              }
+
+              private static boolean hasLunge(ItemStack s) {
+                  Identifier lunge = Identifier.ofVanilla("lunge");
+                  for (RegistryEntry<Enchantment> e : s.getEnchantments().getEnchantments()) {
+                      if (e.matchesId(lunge)) return true;
+                  }
+                  return false;
+              }
+
+              public static void spear(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  if (p == null || mc.interactionManager == null) return;
+
+                  PlayerInventory inv = p.getInventory();
+                  int best = -1, fallback = -1;
+                  for (int i = 0; i < 9; i++) {
+                      ItemStack s = inv.getStack(i);
+                      if (!isSpear(s)) continue;
+                      if (hasLunge(s)) {
+                          best = i;
+                          break;
+                      }
+                      if (fallback < 0) fallback = i;
+                  }
+                  int slot = best >= 0 ? best : fallback;
+                  if (slot < 0) {
+                      p.sendMessage(Text.literal("Spear tidak ada di hotbar"), true);
+                      return;
+                  }
+                  if (spearPrev < 0) spearPrev = inv.getSelectedSlot();
+                  inv.setSelectedSlot(slot);
+                  spearTicks = 3;
+
+                  // Simulasikan klik kiri (jab) supaya lunge aktif pada tick berikutnya
+                  InputUtil.Key k = InputUtil.fromTranslationKey(mc.options.attackKey.getBoundKeyTranslationKey());
+                  KeyBinding.onKeyPressed(k);
+              }
+
+              public static void tick(MinecraftClient mc) {
+                  if (spearTicks > 0) {
+                      spearTicks--;
+                      if (spearTicks == 0) {
+                          if (mc.player != null && spearPrev >= 0) {
+                              mc.player.getInventory().setSelectedSlot(spearPrev);
+                          }
+                          spearPrev = -1;
+                          spearTicks = -1;
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/Crosshair.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+
+          public class Crosshair {
+              public static final String[] STYLES = {"Dot", "Plus", "Plus + Dot", "Bracket Plus", "Square"};
+
+              private static void rect(DrawContext c, int xa, int ya, int xb, int yb, int col) {
+                  c.fill(Math.min(xa, xb), Math.min(ya, yb), Math.max(xa, xb), Math.max(ya, yb), col);
+              }
+
+              private static void plus(DrawContext c, int cx, int cy, int u, int col) {
+                  int t = u, h = t / 2, gap = 2 * u, len = 4 * u;
+                  rect(c, cx - h, cy - gap - len, cx - h + t, cy - gap, col);
+                  rect(c, cx - h, cy + gap, cx - h + t, cy + gap + len, col);
+                  rect(c, cx - gap - len, cy - h, cx - gap, cy - h + t, col);
+                  rect(c, cx + gap, cy - h, cx + gap + len, cy - h + t, col);
+              }
+
+              private static void dot(DrawContext c, int cx, int cy, int u, int col) {
+                  int h = u / 2;
+                  rect(c, cx - h, cy - h, cx - h + u, cy - h + u, col);
+              }
+
+              public static void draw(DrawContext c, int cx, int cy, int style, int u, int rgb) {
+                  int col = 0xFF000000 | (rgb & 0xFFFFFF);
+                  int t = u;
+                  switch (style) {
+                      case 0 -> rect(c, cx - u, cy - u, cx + u, cy + u, col);
+                      case 1 -> plus(c, cx, cy, u, col);
+                      case 2 -> {
+                          plus(c, cx, cy, u, col);
+                          dot(c, cx, cy, u, col);
+                      }
+                      case 3 -> {
+                          plus(c, cx, cy, u, col);
+                          dot(c, cx, cy, u, col);
+                          int d = 7 * u, arm = 3 * u;
+                          for (int sx = -1; sx <= 1; sx += 2) {
+                              for (int sy = -1; sy <= 1; sy += 2) {
+                                  int x = cx + sx * d, y = cy + sy * d;
+                                  rect(c, x, y, x - sx * arm, y - sy * t, col);
+                                  rect(c, x, y, x - sx * t, y - sy * arm, col);
+                              }
+                          }
+                      }
+                      default -> {
+                          int r = 5 * u;
+                          rect(c, cx - r, cy - r, cx + r, cy - r + t, col);
+                          rect(c, cx - r, cy + r - t, cx + r, cy + r, col);
+                          rect(c, cx - r, cy - r, cx - r + t, cy + r, col);
+                          rect(c, cx + r - t, cy - r, cx + r, cy + r, col);
+                      }
+                  }
+              }
+
+              public static void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  Config cfg = Config.get();
+                  int cx = mc.getWindow().getScaledWidth() / 2;
+                  int cy = mc.getWindow().getScaledHeight() / 2;
+                  boolean target = mc.targetedEntity != null;
+                  draw(ctx, cx, cy, cfg.crosshairStyle, cfg.crosshairSize,
+                          target ? cfg.crosshairTargetColor : cfg.crosshairColor);
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/Hud.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.font.TextRenderer;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.client.render.RenderTickCounter;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.math.MathHelper;
+          import net.minecraft.util.math.Vec3d;
+          import org.lwjgl.glfw.GLFW;
+
+          import java.util.ArrayDeque;
+          import java.util.ArrayList;
+          import java.util.Comparator;
+          import java.util.Deque;
+          import java.util.List;
+
+          public class Hud {
+              private static final String[] ARROWS = {
+                      "\u2191", "\u2197", "\u2192", "\u2198", "\u2193", "\u2199", "\u2190", "\u2196"
+              };
+
+              private static final Deque<Long> LMB = new ArrayDeque<>();
+              private static final Deque<Long> RMB = new ArrayDeque<>();
+              private static boolean lDown, rDown;
+
+              private static String arrow(double rel) {
+                  int i = (int) Math.round(rel / 45.0);
+                  i = ((i % 8) + 8) % 8;
+                  return ARROWS[i];
+              }
+
+              private static double dist(ClientPlayerEntity p, Config.Waypoint w) {
+                  double dx = w.x + 0.5 - p.getX();
+                  double dy = w.y - p.getY();
+                  double dz = w.z + 0.5 - p.getZ();
+                  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+              }
+
+              private static String direction(ClientPlayerEntity p, Config.Waypoint w) {
+                  double dx = w.x + 0.5 - p.getX();
+                  double dz = w.z + 0.5 - p.getZ();
+                  double targetYaw = Math.toDegrees(Math.atan2(-dx, dz));
+                  double rel = MathHelper.wrapDegrees(targetYaw - (double) p.getYaw());
+                  return arrow(rel);
+              }
+
+              /** Proyeksi posisi dunia ke koordinat layar (GUI scaled). null jika di belakang kamera. */
+              private static int[] project(MinecraftClient mc, ClientPlayerEntity p, float td,
+                                           double wx, double wy, double wz) {
+                  Vec3d pos = p.getLerpedPos(td);
+                  double ex = pos.x, ey = pos.y + (p.getEyeY() - p.getY()), ez = pos.z;
+                  double dx = wx - ex, dy = wy - ey, dz = wz - ez;
+
+                  double yaw = Math.toRadians(p.getYaw(td));
+                  double pitch = Math.toRadians(p.getPitch(td));
+                  double fx = -Math.sin(yaw) * Math.cos(pitch);
+                  double fy = -Math.sin(pitch);
+                  double fz = Math.cos(yaw) * Math.cos(pitch);
+                  double rx = -Math.cos(yaw), ry = 0, rz = -Math.sin(yaw);
+                  double ux = ry * fz - rz * fy;
+                  double uy = rz * fx - rx * fz;
+                  double uz = rx * fy - ry * fx;
+
+                  double zc = dx * fx + dy * fy + dz * fz;
+                  if (zc <= 0.05) return null;
+                  double xc = dx * rx + dy * ry + dz * rz;
+                  double yc = dx * ux + dy * uy + dz * uz;
+
+                  int W = mc.getWindow().getScaledWidth();
+                  int H = mc.getWindow().getScaledHeight();
+                  double fov = mc.options.getFov().getValue();
+                  double scale = (H / 2.0) / Math.tan(Math.toRadians(fov) / 2.0);
+                  return new int[]{(int) (W / 2.0 + xc / zc * scale), (int) (H / 2.0 - yc / zc * scale)};
+              }
+
+              private static void track(MinecraftClient mc) {
+                  long now = System.currentTimeMillis();
+                  long h = mc.getWindow().getHandle();
+                  boolean l = mc.currentScreen == null
+                          && GLFW.glfwGetMouseButton(h, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+                  boolean r = mc.currentScreen == null
+                          && GLFW.glfwGetMouseButton(h, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
+                  if (l && !lDown) LMB.addLast(now);
+                  if (r && !rDown) RMB.addLast(now);
+                  lDown = l;
+                  rDown = r;
+                  while (!LMB.isEmpty() && now - LMB.peekFirst() > 1000) LMB.pollFirst();
+                  while (!RMB.isEmpty() && now - RMB.peekFirst() > 1000) RMB.pollFirst();
+              }
+
+              private static void key(DrawContext c, TextRenderer tr, int x, int y, int w, int h, String t, boolean down) {
+                  c.fill(x, y, x + w, y + h, down ? 0xAAFFFFFF : 0x88000000);
+                  c.drawCenteredTextWithShadow(tr, Text.literal(t), x + w / 2, y + (h - 8) / 2,
+                          down ? 0xFF000000 : 0xFFFFFFFF);
+              }
+
+              private static void keystrokes(DrawContext c, MinecraftClient mc, TextRenderer tr, Config cfg, int x, int y) {
+                  var o = mc.options;
+                  key(c, tr, x + 22, y, 20, 20, "W", o.forwardKey.isPressed());
+                  key(c, tr, x, y + 22, 20, 20, "A", o.leftKey.isPressed());
+                  key(c, tr, x + 22, y + 22, 20, 20, "S", o.backKey.isPressed());
+                  key(c, tr, x + 44, y + 22, 20, 20, "D", o.rightKey.isPressed());
+                  int yy = y + 44;
+                  if (cfg.keystrokesSpace) {
+                      key(c, tr, x, yy, 64, 12, "----", o.jumpKey.isPressed());
+                      yy += 14;
+                  }
+                  if (cfg.keystrokesMouse) {
+                      key(c, tr, x, yy, 31, 20, "LMB", o.attackKey.isPressed());
+                      key(c, tr, x + 33, yy, 31, 20, "RMB", o.useKey.isPressed());
+                  }
+              }
+
+              private static void marker(DrawContext ctx, TextRenderer tr, Config cfg, ClientPlayerEntity p,
+                                         Config.Waypoint w, int sx, int sy, boolean showLabel) {
+                  int col = 0xFF000000 | (w.color & 0xFFFFFF);
+                  ctx.fill(sx - 7, sy - 7, sx + 7, sy + 7, 0xFF000000);
+                  ctx.fill(sx - 6, sy - 6, sx + 6, sy + 6, col);
+                  String init = (w.name == null || w.name.isEmpty()) ? "?" : w.name.substring(0, 1).toUpperCase();
+                  ctx.drawCenteredTextWithShadow(tr, Text.literal(init), sx, sy - 4, 0xFFFFFFFF);
+
+                  if (showLabel) {
+                      String name = w.name == null ? "" : w.name;
+                      int nw = tr.getWidth(name);
+                      ctx.fill(sx - nw / 2 - 2, sy + 9, sx + nw / 2 + 2, sy + 19, 0x99000000);
+                      ctx.drawCenteredTextWithShadow(tr, Text.literal(name), sx, sy + 10, 0xFFFFFFFF);
+                      if (cfg.waypointDistance) {
+                          String d = (int) dist(p, w) + "m";
+                          int dw = tr.getWidth(d);
+                          ctx.fill(sx - dw / 2 - 2, sy + 20, sx + dw / 2 + 2, sy + 30, 0x99000000);
+                          ctx.drawCenteredTextWithShadow(tr, Text.literal(d), sx, sy + 21, 0xFFCCCCCC);
+                      }
+                  }
+              }
+
+              public static void render(DrawContext ctx, RenderTickCounter tick) {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (mc.player == null || mc.world == null || mc.options.hudHidden) return;
+
+                  Config cfg = Config.get();
+                  ClientPlayerEntity p = mc.player;
+                  TextRenderer tr = mc.textRenderer;
+                  int W = mc.getWindow().getScaledWidth();
+                  int H = mc.getWindow().getScaledHeight();
+                  int cx = W / 2, cy = H / 2;
+                  float td = tick.getTickProgress(false);
+
+                  track(mc);
+
+                  List<String> lines = new ArrayList<>();
+
+                  if (cfg.fps) lines.add("FPS: " + mc.getCurrentFps());
+                  if (cfg.cps) lines.add("CPS: " + LMB.size() + " | " + RMB.size());
+
+                  if (cfg.healthIndicator) {
+                      lines.add(String.format("HP: %.1f / %.1f", p.getHealth(), p.getMaxHealth()));
+                      if (mc.targetedEntity instanceof LivingEntity le) {
+                          float hp = le.getHealth();
+                          float max = Math.max(1f, le.getMaxHealth());
+                          Text label = Text.empty().append(le.getDisplayName())
+                                  .append(Text.literal(String.format("  %.1f / %.1f", hp, max)));
+                          ctx.drawCenteredTextWithShadow(tr, label, cx, 8, 0xFFFFFFFF);
+                          int bw = 100;
+                          int x1 = cx - bw / 2;
+                          int fill = (int) (bw * Math.min(1f, hp / max));
+                          int color = hp / max > 0.5f ? 0xFF55FF55 : (hp / max > 0.25f ? 0xFFFFFF55 : 0xFFFF5555);
+                          ctx.fill(x1 - 1, 20, x1 + bw + 1, 26, 0xFF000000);
+                          ctx.fill(x1, 21, x1 + fill, 25, color);
+                      }
+                  }
+
+                  if (cfg.coordinates) {
+                      lines.add(String.format("XYZ: %d %d %d", p.getBlockX(), p.getBlockY(), p.getBlockZ()));
+                  }
+
+                  String dim = mc.world.getRegistryKey().getValue().toString();
+                  List<Config.Waypoint> here = new ArrayList<>();
+                  for (Config.Waypoint w : cfg.list) {
+                      if (dim.equals(w.dim)) here.add(w);
+                  }
+                  here.sort(Comparator.comparingDouble(w -> dist(p, w)));
+
+                  if (cfg.waypoints) {
+                      for (Config.Waypoint w : here) {
+                          int[] s = project(mc, p, td, w.x + 0.5, w.y + 1.0, w.z + 0.5);
+                          if (s == null) continue;
+                          if (s[0] < -20 || s[0] > W + 20 || s[1] < -20 || s[1] > H + 20) continue;
+                          boolean near = Math.abs(s[0] - cx) < 70 && Math.abs(s[1] - cy) < 45;
+                          marker(ctx, tr, cfg, p, w, s[0], s[1], near);
+                      }
+                  }
+
+                  if (cfg.waypointArrow && !here.isEmpty()) {
+                      Config.Waypoint n = here.get(0);
+                      String s = direction(p, n) + " " + n.name + " (" + (int) dist(p, n) + "m)";
+                      ctx.drawCenteredTextWithShadow(tr, Text.literal(s), cx, 32, 0xFF000000 | (n.color & 0xFFFFFF));
+                  }
+
+                  if (cfg.waypointList && !here.isEmpty()) {
+                      lines.add("-- Waypoints --");
+                      int count = Math.min(5, here.size());
+                      for (int i = 0; i < count; i++) {
+                          Config.Waypoint w = here.get(i);
+                          lines.add(direction(p, w) + " " + w.name + " " + (int) dist(p, w) + "m");
+                      }
+                  }
+
+                  int y = 6;
+                  for (String l : lines) {
+                      ctx.drawTextWithShadow(tr, Text.literal(l), 6, y, 0xFFFFFFFF);
+                      y += 10;
+                  }
+
+                  if (cfg.keystrokes) {
+                      keystrokes(ctx, mc, tr, cfg, W - 74, cy - 30);
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/Ui.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.gui.DrawContext;
+
+          public class Ui {
+              public static final int BG = 0xF0141420;
+              public static final int BORDER = 0xFF30304A;
+              public static final int PILL = 0xFFE0505E;
+              public static final int ON_BG = 0xFF2A4A35;
+              public static final int ON_BD = 0xFF4CAF50;
+              public static final int OFF_BG = 0xFF4A2A32;
+              public static final int OFF_BD = 0xFFB04858;
+              public static final int[] PALETTE = {
+                      0xFFFFFF, 0xFF5555, 0xFFAA00, 0xFFFF55, 0x55FF55, 0x00AAAA,
+                      0x55FFFF, 0x5555FF, 0xAA00AA, 0xFF55FF, 0xAAAAAA, 0x000000
+              };
+
+              public static void border(DrawContext c, int x, int y, int w, int h, int col) {
+                  c.fill(x, y, x + w, y + 1, col);
+                  c.fill(x, y + h - 1, x + w, y + h, col);
+                  c.fill(x, y, x + 1, y + h, col);
+                  c.fill(x + w - 1, y, x + w, y + h, col);
+              }
+
+              public static void box(DrawContext c, int x, int y, int w, int h, int bg, int bd) {
+                  c.fill(x, y, x + w, y + h, bg);
+                  border(c, x, y, w, h, bd);
+              }
+
+              public static String hex(int rgb) {
+                  return String.format("#%06X", rgb & 0xFFFFFF);
+              }
+
+              public static Integer parseHex(String s) {
+                  try {
+                      s = s.trim();
+                      if (s.startsWith("#")) s = s.substring(1);
+                      if (s.length() != 6) return null;
+                      return Integer.parseInt(s, 16);
+                  } catch (Exception e) {
+                      return null;
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/Features.java <<'EOF'
+          package com.example.clientutils;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.function.Consumer;
+          import java.util.function.Supplier;
+
+          public class Features {
+              public static class F {
+                  public final String id, name;
+                  public final Supplier<Boolean> get;
+                  public final Consumer<Boolean> set;
+                  public final boolean settings;
+
+                  F(String id, String name, Supplier<Boolean> get, Consumer<Boolean> set, boolean settings) {
+                      this.id = id;
+                      this.name = name;
+                      this.get = get;
+                      this.set = set;
+                      this.settings = settings;
+                  }
+              }
+
+              public static List<F> all() {
+                  List<F> l = new ArrayList<>();
+                  l.add(new F("health", "Health", () -> Config.get().healthIndicator, v -> Config.get().healthIndicator = v, false));
+                  l.add(new F("waypoints", "Waypoints", () -> Config.get().waypoints, v -> Config.get().waypoints = v, true));
+                  l.add(new F("wplist", "WP List", () -> Config.get().waypointList, v -> Config.get().waypointList = v, false));
+                  l.add(new F("coords", "Coords", () -> Config.get().coordinates, v -> Config.get().coordinates = v, false));
+                  l.add(new F("elytra", "Elytra Swap", () -> Config.get().elytraSwapper, v -> Config.get().elytraSwapper = v, false));
+                  l.add(new F("pearl", "Pearl+Wind", () -> Config.get().pearlSwapper, v -> Config.get().pearlSwapper = v, true));
+                  l.add(new F("spear", "Spear Swap", () -> Config.get().spearSwapper, v -> Config.get().spearSwapper = v, false));
+                  l.add(new F("crosshair", "Crosshair", () -> Config.get().crosshair, v -> Config.get().crosshair = v, true));
+                  l.add(new F("keystrokes", "Keystrokes", () -> Config.get().keystrokes, v -> Config.get().keystrokes = v, true));
+                  l.add(new F("fps", "FPS", () -> Config.get().fps, v -> Config.get().fps = v, false));
+                  l.add(new F("cps", "CPS", () -> Config.get().cps, v -> Config.get().cps = v, false));
+                  return l;
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/BaseScreen.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Formatting;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.function.Consumer;
+          import java.util.function.IntConsumer;
+          import java.util.function.IntSupplier;
+          import java.util.function.Supplier;
+
+          public abstract class BaseScreen extends Screen {
+              protected final Screen parent;
+              protected final String header;
+              protected int px, py, pw, ph;
+              protected final List<Object[]> labels = new ArrayList<>();
+              protected final List<int[]> swatches = new ArrayList<>();
+
+              protected BaseScreen(Screen parent, String header) {
+                  super(Text.literal(header));
+                  this.parent = parent;
+                  this.header = header;
+              }
+
+              protected abstract void build();
+
+              protected int pillX() {
+                  return px + 10;
+              }
+
+              @Override
+              protected void init() {
+                  pw = Math.min(this.width - 16, 360);
+                  ph = Math.min(this.height - 16, 230);
+                  px = (this.width - pw) / 2;
+                  py = (this.height - ph) / 2;
+                  labels.clear();
+                  swatches.clear();
+                  if (parent != null) {
+                      addDrawableChild(ButtonWidget.builder(Text.empty(), b -> this.client.setScreen(parent))
+                              .dimensions(pillX(), py + 8, 130, 20).build());
+                  }
+                  build();
+              }
+
+              protected void label(String s, int x, int y) {
+                  labels.add(new Object[]{s, x, y});
+              }
+
+              protected void toggle(int y, String name, Supplier<Boolean> get, Consumer<Boolean> set) {
+                  addDrawableChild(ButtonWidget.builder(onOff(name, get.get()), btn -> {
+                      set.accept(!get.get());
+                      Config.save();
+                      btn.setMessage(onOff(name, get.get()));
+                  }).dimensions(px + 14, y, 230, 20).build());
+              }
+
+              protected static Text onOff(String name, boolean on) {
+                  return Text.literal(name + ": ")
+                          .append(Text.literal(on ? "ON" : "OFF").formatted(on ? Formatting.GREEN : Formatting.RED));
+              }
+
+              /** Baris pilih warna: label, kolom hex, dan palet warna. Tinggi baris = 30. */
+              protected void colorRow(int y, String name, IntSupplier get, IntConsumer set) {
+                  int x = px + 14;
+                  label(name, x, y);
+                  TextFieldWidget f = new TextFieldWidget(this.textRenderer, x, y + 11, 56, 16, Text.literal(name));
+                  f.setMaxLength(7);
+                  f.setText(Ui.hex(get.getAsInt()));
+                  f.setChangedListener(s -> {
+                      Integer v = Ui.parseHex(s);
+                      if (v != null) set.accept(v);
+                  });
+                  addDrawableChild(f);
+
+                  int sx = x + 64;
+                  for (int i = 0; i < Ui.PALETTE.length; i++) {
+                      final int c = Ui.PALETTE[i];
+                      int bx = sx + i * 15;
+                      addDrawableChild(ButtonWidget.builder(Text.empty(), b -> {
+                          set.accept(c);
+                          f.setText(Ui.hex(c));
+                      }).dimensions(bx, y + 12, 13, 13).build());
+                      swatches.add(new int[]{bx, y + 12, 13, c});
+                  }
+              }
+
+              @Override
+              public void renderBackground(DrawContext c, int mx, int my, float d) {
+                  super.renderBackground(c, mx, my, d);
+                  Ui.box(c, px, py, pw, ph, Ui.BG, Ui.BORDER);
+              }
+
+              @Override
+              public void render(DrawContext c, int mx, int my, float d) {
+                  super.render(c, mx, my, d);
+
+                  c.fill(pillX(), py + 8, pillX() + 130, py + 28, Ui.PILL);
+                  String t = parent != null ? "< " + header : header;
+                  c.drawCenteredTextWithShadow(this.textRenderer, Text.literal(t), pillX() + 65, py + 14, 0xFFFFFFFF);
+
+                  for (Object[] l : labels) {
+                      c.drawTextWithShadow(this.textRenderer, Text.literal((String) l[0]),
+                              (Integer) l[1], (Integer) l[2], 0xFFFFFFFF);
+                  }
+                  for (int[] s : swatches) {
+                      c.fill(s[0], s[1], s[0] + s[2], s[1] + s[2], 0xFF000000 | s[3]);
+                      Ui.border(c, s[0] - 1, s[1] - 1, s[2] + 2, s[2] + 2, 0xFF888888);
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/ModMenuScreen.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class ModMenuScreen extends BaseScreen {
+              private final int tab;
+              private TextFieldWidget search;
+              private final List<Tile> tiles = new ArrayList<>();
+              private int tw, th, rowH, cx0;
+
+              private static class Tile {
+                  Features.F f;
+                  ButtonWidget toggle, gear;
+                  int x, y, w, h;
+                  boolean show;
+              }
+
+              public ModMenuScreen(int tab) {
+                  super(null, "Mod Menu");
+                  this.tab = tab;
+              }
+
+              @Override
+              protected int pillX() {
+                  return px + 44;
+              }
+
+              @Override
+              protected void build() {
+                  tiles.clear();
+                  addDrawableChild(ButtonWidget.builder(Text.empty(), b -> this.client.setScreen(new ModMenuScreen(0)))
+                          .dimensions(px + 6, py + 8, 34, 28).build());
+                  addDrawableChild(ButtonWidget.builder(Text.empty(), b -> this.client.setScreen(new ModMenuScreen(1)))
+                          .dimensions(px + 6, py + 40, 34, 28).build());
+
+                  if (tab == 0) buildMods();
+                  else buildGeneral();
+              }
+
+              private void buildMods() {
+                  cx0 = px + 44;
+                  int gw = pw - 52;
+                  tw = (gw - 12) / 3;
+                  rowH = Math.max(24, Math.min(34, (ph - 44) / 4));
+                  th = rowH - 6;
+
+                  addDrawableChild(ButtonWidget.builder(Text.literal("Clear"), b -> {
+                      if (search != null) search.setText("");
+                  }).dimensions(px + 180, py + 8, 36, 20).build());
+
+                  search = new TextFieldWidget(this.textRenderer, px + 220, py + 8, pw - 228, 20, Text.literal("Search"));
+                  search.setPlaceholder(Text.literal("Search mods..."));
+                  addDrawableChild(search);
+
+                  for (Features.F f : Features.all()) {
+                      Tile t = new Tile();
+                      t.f = f;
+                      int w = tw - (f.settings ? 16 : 0);
+                      t.toggle = ButtonWidget.builder(Text.empty(), b -> {
+                          f.set.accept(!f.get.get());
+                          Config.save();
+                      }).dimensions(0, 0, w, th).build();
+                      addDrawableChild(t.toggle);
+                      if (f.settings) {
+                          t.gear = ButtonWidget.builder(Text.empty(),
+                                  b -> this.client.setScreen(new SettingsScreen(this, f.id, f.name)))
+                                  .dimensions(0, 0, 14, th).build();
+                          addDrawableChild(t.gear);
+                      }
+                      tiles.add(t);
+                  }
+                  search.setChangedListener(s -> relayout());
+                  relayout();
+              }
+
+              private void relayout() {
+                  String q = search == null ? "" : search.getText().toLowerCase();
+                  int i = 0;
+                  for (Tile t : tiles) {
+                      boolean m = q.isEmpty() || t.f.name.toLowerCase().contains(q);
+                      t.show = m;
+                      t.toggle.visible = m;
+                      if (t.gear != null) t.gear.visible = m;
+                      if (!m) continue;
+                      int col = i % 3, row = i / 3;
+                      t.x = cx0 + col * (tw + 6);
+                      t.y = py + 36 + row * rowH;
+                      t.w = tw;
+                      t.h = th;
+                      t.toggle.setX(t.x);
+                      t.toggle.setY(t.y);
+                      if (t.gear != null) {
+                          t.gear.setX(t.x + tw - 14);
+                          t.gear.setY(t.y);
+                      }
+                      i++;
+                  }
+              }
+
+              private void buildGeneral() {
+                  int x = px + 50;
+                  int y = py + 40;
+                  label("Keybind (bisa diubah di Options > Controls):", x, y);
+                  label("U  -  Buka Mod Menu", x, y + 14);
+                  label("R  -  Elytra Swapper", x, y + 26);
+                  label("Y  -  Ender Pearl + Wind Charge", x, y + 38);
+                  label("F  -  Spear Lunge (ubah 'Swap Offhand' bila bentrok)", x, y + 50);
+                  addDrawableChild(ButtonWidget.builder(Text.literal("Reset semua pengaturan"), b -> {
+                      Config.resetFeatures();
+                      this.client.setScreen(new ModMenuScreen(1));
+                  }).dimensions(x, y + 80, 200, 20).build());
+              }
+
+              @Override
+              public void render(DrawContext c, int mx, int my, float d) {
+                  super.render(c, mx, my, d);
+
+                  // sidebar tab
+                  Ui.box(c, px + 6, py + 8, 34, 28, tab == 0 ? 0xFF3A3A5A : 0xFF22222F, tab == 0 ? Ui.PILL : Ui.BORDER);
+                  c.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Mods"), px + 23, py + 18, 0xFFFFFFFF);
+                  Ui.box(c, px + 6, py + 40, 34, 28, tab == 1 ? 0xFF3A3A5A : 0xFF22222F, tab == 1 ? Ui.PILL : Ui.BORDER);
+                  c.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Info"), px + 23, py + 50, 0xFFFFFFFF);
+
+                  if (tab != 0) return;
+
+                  for (Tile t : tiles) {
+                      if (!t.show) continue;
+                      boolean on = t.f.get.get();
+                      int ww = t.f.settings ? t.w - 16 : t.w;
+                      Ui.box(c, t.x, t.y, ww, t.h, on ? Ui.ON_BG : Ui.OFF_BG, on ? Ui.ON_BD : Ui.OFF_BD);
+                      if (t.toggle.isHovered()) c.fill(t.x + 1, t.y + 1, t.x + ww - 1, t.y + t.h - 1, 0x22FFFFFF);
+                      String name = this.textRenderer.trimToWidth(t.f.name, ww - 10);
+                      c.drawTextWithShadow(this.textRenderer, Text.literal(name), t.x + 6, t.y + (t.h - 8) / 2, 0xFFFFFFFF);
+                      if (t.gear != null) {
+                          Ui.box(c, t.x + t.w - 14, t.y, 14, t.h, 0xFF2A2A3C, Ui.BORDER);
+                          if (t.gear.isHovered()) c.fill(t.x + t.w - 13, t.y + 1, t.x + t.w - 1, t.y + t.h - 1, 0x22FFFFFF);
+                          c.drawCenteredTextWithShadow(this.textRenderer, Text.literal(">"),
+                                  t.x + t.w - 7, t.y + (t.h - 8) / 2, 0xFFFFFFFF);
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/SettingsScreen.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.text.Text;
+
+          public class SettingsScreen extends BaseScreen {
+              private final String id;
+
+              public SettingsScreen(Screen parent, String id, String name) {
+                  super(parent, name);
+                  this.id = id;
+              }
+
+              @Override
+              protected void build() {
+                  Config c = Config.get();
+                  int y = py + 38;
+                  switch (id) {
+                      case "crosshair" -> {
+                          addDrawableChild(ButtonWidget.builder(styleText(), b -> {
+                              c.crosshairStyle = (c.crosshairStyle + 1) % Crosshair.STYLES.length;
+                              Config.save();
+                              b.setMessage(styleText());
+                          }).dimensions(px + 14, y, 140, 20).build());
+                          addDrawableChild(ButtonWidget.builder(sizeText(), b -> {
+                              c.crosshairSize = c.crosshairSize % 4 + 1;
+                              Config.save();
+                              b.setMessage(sizeText());
+                          }).dimensions(px + 160, y, 90, 20).build());
+                          colorRow(y + 28, "Color", () -> c.crosshairColor, v -> {
+                              c.crosshairColor = v;
+                              Config.save();
+                          });
+                          colorRow(y + 60, "Target Color", () -> c.crosshairTargetColor, v -> {
+                              c.crosshairTargetColor = v;
+                              Config.save();
+                          });
+                          label("Preview", px + 14, y + 96);
+                      }
+                      case "waypoints" -> {
+                          toggle(y, "Tampilkan jarak", () -> c.waypointDistance, v -> c.waypointDistance = v);
+                          toggle(y + 24, "Panah waypoint terdekat", () -> c.waypointArrow, v -> c.waypointArrow = v);
+                          addDrawableChild(ButtonWidget.builder(Text.literal("Kelola Waypoint..."),
+                                  b -> this.client.setScreen(new WaypointListScreen(this, 0)))
+                                  .dimensions(px + 14, y + 52, 230, 20).build());
+                      }
+                      case "pearl" -> {
+                          toggle(y, "Lempar Wind Charge bersamaan", () -> c.windCombo, v -> c.windCombo = v);
+                          label("Tekan Y: lempar Ender Pearl lalu Wind Charge.", px + 14, y + 30);
+                          label("Keduanya harus ada di hotbar.", px + 14, y + 42);
+                      }
+                      case "keystrokes" -> {
+                          toggle(y, "Tampilkan mouse (LMB/RMB)", () -> c.keystrokesMouse, v -> c.keystrokesMouse = v);
+                          toggle(y + 24, "Tampilkan Spasi", () -> c.keystrokesSpace, v -> c.keystrokesSpace = v);
+                      }
+                      default -> label("Tidak ada pengaturan.", px + 14, y);
+                  }
+              }
+
+              private Text styleText() {
+                  Config c = Config.get();
+                  return Text.literal("Style: " + Crosshair.STYLES[c.crosshairStyle % Crosshair.STYLES.length]);
+              }
+
+              private Text sizeText() {
+                  return Text.literal("Size: " + Config.get().crosshairSize);
+              }
+
+              @Override
+              public void render(DrawContext c, int mx, int my, float d) {
+                  super.render(c, mx, my, d);
+                  if (id.equals("crosshair")) {
+                      Config cfg = Config.get();
+                      int bx = px + 14, by = py + 148, bw = 110, bh = 60;
+                      Ui.box(c, bx, by, bw, bh, 0xFF22222F, Ui.BORDER);
+                      Crosshair.draw(c, bx + 30, by + bh / 2, cfg.crosshairStyle, cfg.crosshairSize, cfg.crosshairColor);
+                      Crosshair.draw(c, bx + 80, by + bh / 2, cfg.crosshairStyle, cfg.crosshairSize, cfg.crosshairTargetColor);
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/WaypointListScreen.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.text.Text;
+
+          import java.util.List;
+
+          public class WaypointListScreen extends BaseScreen {
+              private static final int PER_PAGE = 5;
+              private final int page;
+
+              public WaypointListScreen(Screen parent, int page) {
+                  super(parent, "Waypoint");
+                  this.page = page;
+              }
+
+              private static int maxPage() {
+                  return Math.max(0, (Config.get().list.size() - 1) / PER_PAGE);
+              }
+
+              @Override
+              protected void build() {
+                  addDrawableChild(ButtonWidget.builder(Text.literal("+ Tambah"),
+                          b -> this.client.setScreen(new WaypointEditScreen(this, -1)))
+                          .dimensions(px + pw - 100, py + 8, 90, 20).build());
+
+                  List<Config.Waypoint> l = Config.get().list;
+                  int start = page * PER_PAGE;
+                  for (int i = 0; i < PER_PAGE; i++) {
+                      int idx = start + i;
+                      if (idx >= l.size()) break;
+                      Config.Waypoint w = l.get(idx);
+                      int y = py + 38 + i * 26;
+                      final int fi = idx;
+
+                      swatches.add(new int[]{px + 14, y + 5, 10, w.color});
+                      String dim = w.dim == null ? "?" : w.dim.replace("minecraft:", "");
+                      String s = w.name + "  [" + w.x + ", " + w.y + ", " + w.z + "]  " + dim;
+                      label(this.textRenderer.trimToWidth(s, pw - 140), px + 32, y + 6);
+
+                      addDrawableChild(ButtonWidget.builder(Text.literal("Edit"),
+                              b -> this.client.setScreen(new WaypointEditScreen(this, fi)))
+                              .dimensions(px + pw - 98, y, 40, 20).build());
+                      addDrawableChild(ButtonWidget.builder(Text.literal("Hapus"), b -> {
+                          Config.get().list.remove(fi);
+                          Config.save();
+                          this.client.setScreen(new WaypointListScreen(parent, Math.min(page, maxPage())));
+                      }).dimensions(px + pw - 54, y, 44, 20).build());
+                  }
+
+                  int by = py + ph - 26;
+                  ButtonWidget prev = ButtonWidget.builder(Text.literal("<"),
+                          b -> this.client.setScreen(new WaypointListScreen(parent, page - 1)))
+                          .dimensions(px + 14, by, 40, 20).build();
+                  prev.active = page > 0;
+                  addDrawableChild(prev);
+
+                  ButtonWidget next = ButtonWidget.builder(Text.literal(">"),
+                          b -> this.client.setScreen(new WaypointListScreen(parent, page + 1)))
+                          .dimensions(px + 60, by, 40, 20).build();
+                  next.active = page < maxPage();
+                  addDrawableChild(next);
+
+                  label("Hal. " + (page + 1) + "/" + (maxPage() + 1) + "   Total: " + l.size(), px + 110, by + 6);
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/clientutils/WaypointEditScreen.java <<'EOF'
+          package com.example.clientutils;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+
+          public class WaypointEditScreen extends BaseScreen {
+              private final int idx;
+              private final Config.Waypoint w = new Config.Waypoint();
+              private TextFieldWidget nameF, xF, yF, zF;
+
+              public WaypointEditScreen(Screen parent, int idx) {
+                  super(parent, idx < 0 ? "Waypoint Baru" : "Edit Waypoint");
+                  this.idx = idx;
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (idx >= 0 && idx < Config.get().list.size()) {
+                      Config.Waypoint o = Config.get().list.get(idx);
+                      w.name = o.name;
+                      w.dim = o.dim;
+                      w.x = o.x;
+                      w.y = o.y;
+                      w.z = o.z;
+                      w.color = o.color;
+                  } else if (mc.player != null && mc.world != null) {
+                      w.name = "Waypoint " + (Config.get().list.size() + 1);
+                      w.dim = mc.world.getRegistryKey().getValue().toString();
+                      w.x = mc.player.getBlockX();
+                      w.y = mc.player.getBlockY();
+                      w.z = mc.player.getBlockZ();
+                  }
+              }
+
+              private static int num(String s, int def) {
+                  try {
+                      return Integer.parseInt(s.trim());
+                  } catch (Exception e) {
+                      return def;
+                  }
+              }
+
+              @Override
+              protected void build() {
+                  int x = px + 14;
+                  label("Nama", x, py + 34);
+                  nameF = new TextFieldWidget(this.textRenderer, x, py + 44, 220, 18, Text.literal("Nama"));
+                  nameF.setMaxLength(24);
+                  nameF.setText(w.name);
+                  addDrawableChild(nameF);
+
+                  label("X", x, py + 68);
+                  label("Y", x + 66, py + 68);
+                  label("Z", x + 132, py + 68);
+                  xF = new TextFieldWidget(this.textRenderer, x, py + 78, 58, 16, Text.literal("X"));
+                  yF = new TextFieldWidget(this.textRenderer, x + 66, py + 78, 58, 16, Text.literal("Y"));
+                  zF = new TextFieldWidget(this.textRenderer, x + 132, py + 78, 58, 16, Text.literal("Z"));
+                  xF.setText(String.valueOf(w.x));
+                  yF.setText(String.valueOf(w.y));
+                  zF.setText(String.valueOf(w.z));
+                  addDrawableChild(xF);
+                  addDrawableChild(yF);
+                  addDrawableChild(zF);
+
+                  colorRow(py + 102, "Warna", () -> w.color, v -> w.color = v);
+
+                  String dim = w.dim == null ? "?" : w.dim.replace("minecraft:", "");
+                  label("Dimensi: " + dim, x, py + 138);
+
+                  addDrawableChild(ButtonWidget.builder(Text.literal("Simpan"), b -> save())
+                          .dimensions(x, py + 156, 100, 20).build());
+                  addDrawableChild(ButtonWidget.builder(Text.literal("Batal"), b -> this.client.setScreen(parent))
+                          .dimensions(x + 108, py + 156, 100, 20).build());
+              }
+
+              private void save() {
+                  String n = nameF.getText().trim();
+                  if (n.isEmpty()) n = "Waypoint";
+                  w.name = n;
+                  w.x = num(xF.getText(), w.x);
+                  w.y = num(yF.getText(), w.y);
+                  w.z = num(zF.getText(), w.z);
+                  if (idx < 0 || idx >= Config.get().list.size()) Config.get().list.add(w);
+                  else Config.get().list.set(idx, w);
+                  Config.save();
+                  this.client.setScreen(parent);
+              }
+          }
+          EOF
+
+      - name: Build
+        working-directory: mod
+        run: gradle build --no-daemon
+
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: clientutils-1.21.11
+          path: |
+            mod/build/libs/*.jar
+            !mod/build/libs/*-sources.jar
